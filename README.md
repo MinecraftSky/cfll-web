@@ -44,6 +44,7 @@
 
 ## 注意事项
 
+*   **文件路径**：ai文件夹下的是AI网站代理。而web文件夹下的是普通网站代理。（注意：ai文件夹下的proxy-api.ts是AI用的API接口代理）。
 *   **Deno Deploy 免费额度**: Deno Deploy 提供非常慷慨的免费套餐（包括每月大量的请求数和数据传输量），对于网站的使用场景通常绰绰有余。但仍需注意，超出免费额度可能会产生费用或服务受限，请自行查阅 [Deno Deploy Pricing](https://deno.com/deploy/pricing)。
 *   **更新**: 如果本项目有重要更新，你可能需要同步你 Fork 的仓库，Deno Deploy 通常会自动重新部署更新后的代码。
 
