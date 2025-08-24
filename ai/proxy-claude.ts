@@ -1,67 +1,82 @@
-// 导入 oak_http_proxy 的 proxy 函数，用于实现 HTTP 代理
-import { proxy } from "https://deno.land/x/oak_http_proxy@2.3.0/mod.ts";
-// 导入 Oak 框架的 Application 和 Router 类，用于创建 web 服务器和路由
-import { Application, Router } from "https://deno.land/x/oak@v12.6.2/mod.ts";
-
-// 创建 Oak 应用程序实例
-const app = new Application();
-// 创建路由器实例
-const router = new Router();
-
-// 配置 CORS 中间件，允许跨域请求
-app.use(async (ctx, next) => {
-  // 设置 CORS 头，允许所有来源（生产环境中可限制为特定域名）
-  ctx.response.headers.set("Access-Control-Allow-Origin", "*");
-  ctx.response.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  ctx.response.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization, User-Agent, Referer, Cookie");
-  ctx.response.headers.set("Access-Control-Allow-Credentials", "true"); // 支持带凭证的请求（如 Cookies）
-
-  // 处理 OPTIONS 预检请求
-  if (ctx.request.method === "OPTIONS") {
-    ctx.response.status = 204;
-    return;
+// 使用 Deno.serve 创建一个 HTTP 服务器，监听指定端口
+Deno.serve({ port: 8080 }, async (request) => {
+  // 处理 CORS 预检请求 (OPTIONS)
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*", // 允许所有域名，生产环境可限制
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Cookie, User-Agent, Referer",
+        "Access-Control-Max-Age": "86400", // 缓存预检请求 24 小时
+      },
+    });
   }
-  await next();
-});
 
-// 配置代理中间件，目标为 claude.ai
-const proxyMiddleware = proxy("https://claude.ai", {
-  // 确保转发所有请求头，包括 User-Agent、Referer 和 Authorization
-  forwardHeaders: true,
-  // 保留客户端会话，支持登录功能
-  preserveReqSession: true,
-  // 自定义转发头，确保 User-Agent 和 Referer 被正确传递
-  headers: {
-    "User-Agent": true, // 转发客户端的 User-Agent
-    "Referer": true,    // 转发客户端的 Referer
-    "Cookie": true,     // 保留 Cookies，支持会话
-    "Authorization": true, // 支持可能的身份验证头
-  },
-});
+  // 解析传入请求的 URL，获取路径和查询参数
+  const { pathname, search } = new URL(request.url);
+  
+  // 构建目标 URL，将请求的路径附加到 claude.ai
+  const url = new URL(pathname, 'https://claude.ai');
+  url.search = search;
 
-// 定义根路由，处理所有请求并代理到 claude.ai
-router.all("(.*)", async (ctx, next) => {
-  // 在代理前记录 User-Agent 和 Referer（用于调试）
-  console.log("请求 User-Agent:", ctx.request.headers.get("User-Agent"));
-  console.log("请求 Referer:", ctx.request.headers.get("Referer"));
-  await proxyMiddleware(ctx, next);
-});
+  // 创建新的 Headers 对象，复制原始请求的头部
+  const headers = new Headers(request.headers);
+  // 设置 Host 头部为目标域名
+  headers.set('Host', 'claude.ai');
+  // 设置 Referer 头部，模拟从 claude.ai 发起的请求
+  headers.set('Referer', 'https://claude.ai' + pathname);
+  // 设置或传递 User-Agent，防止检测异常
+  headers.set('User-Agent', request.headers.get('User-Agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36');
+  // 传递 Cookie 以支持会话和登录
+  if (request.headers.get('Cookie')) {
+    headers.set('Cookie', request.headers.get('Cookie'));
+  }
 
-// 使用路由中间件
-app.use(router.routes());
-app.use(router.allowedMethods());
-
-// 错误处理中间件，捕获代理过程中的错误
-app.use(async (ctx, next) => {
   try {
-    await next();
-  } catch (err) {
-    ctx.response.status = 500;
-    ctx.response.body = { error: "代理服务器错误，请稍后重试" };
-    console.error("错误:", err);
+    // 使用 fetch 将请求转发到目标 URL
+    const response = await fetch(url, {
+      method: request.method, // 使用原始请求的 HTTP 方法
+      headers,               // 使用修改后的头部
+      body: request.body,    // 传递原始请求的 body
+      redirect: 'manual',    // 手动处理重定向
+    });
+
+    // 创建新的响应头部，传递返回的 Cookie 以维持会话
+    const responseHeaders = new Headers(response.headers);
+    // 添加 CORS 头部，允许跨域访问
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
+    // 确保返回的 Set-Cookie 头部被传递给客户端
+    if (response.headers.get('Set-Cookie')) {
+      responseHeaders.set('Set-Cookie', response.headers.get('Set-Cookie'));
+    }
+
+    // 处理重定向（登录流程可能涉及多次重定向）
+    if (response.status >= 300 && response.status < 400) {
+      const redirectUrl = response.headers.get('Location');
+      if (redirectUrl) {
+        // 如果是相对路径，转换为代理路径
+        return new Response(null, {
+          status: response.status,
+          headers: {
+            'Location': redirectUrl.startsWith('/')
+              ? `http://localhost:8080${redirectUrl}`
+              : redirectUrl,
+            'Set-Cookie': response.headers.get('Set-Cookie') || '',
+            'Access-Control-Allow-Origin': '*', // 确保重定向响应支持 CORS
+          },
+        });
+      }
+    }
+
+    // 返回目标服务器的响应
+    return new Response(response.body, {
+      status: response.status,
+      headers: responseHeaders,
+    });
+  } catch (error) {
+    // 错误处理
+    console.error('代理请求失败:', error);
+    return new Response('代理请求失败', { status: 500, headers: { 'Access-Control-Allow-Origin': '*' } });
   }
 });
-
-// 启动服务器，监听 8000 端口（可根据需要修改）
-console.log("代理服务器启动于 http://localhost:8000");
-await app.listen({ port: 8000 });
